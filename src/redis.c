@@ -1274,10 +1274,13 @@ void initServer() {
 
     createSharedObjects();
     adjustOpenFilesLimit();
+
+    // 创建核心数据结构 server.el
     server.el = aeCreateEventLoop(server.maxclients+1024);
     server.db = zmalloc(sizeof(redisDb)*server.dbnum);
 
     if (server.port != 0) {
+        // 创建服务器端的监听 socket fd. 然后绑定, 监听在指定端口
         server.ipfd = anetTcpServer(server.neterr,server.port,server.bindaddr);
         if (server.ipfd == ANET_ERR) {
             redisLog(REDIS_WARNING, "Opening port %d: %s",
@@ -1335,7 +1338,9 @@ void initServer() {
     server.unixtime = time(NULL);
     server.lastbgsave_status = REDIS_OK;
     server.stop_writes_on_bgsave_err = 1;
+    // 创建时间事件, 事件函数是 serverCron
     aeCreateTimeEvent(server.el, 1, serverCron, NULL, NULL);
+    // 把监听socket fd 加入到 epoll 监控的读事件中. 事件函数是: acceptTcpHandler
     if (server.ipfd > 0 && aeCreateFileEvent(server.el,server.ipfd,AE_READABLE,
         acceptTcpHandler,NULL) == AE_ERR) redisPanic("Unrecoverable error creating server.ipfd file event.");
     if (server.sofd > 0 && aeCreateFileEvent(server.el,server.sofd,AE_READABLE,

@@ -488,6 +488,8 @@ void copyClientOutputBuffer(redisClient *dst, redisClient *src) {
 
 static void acceptCommonHandler(int fd, int flags) {
     redisClient *c;
+    // 给新的客户端新建对应的 redisClient 对象, 并把客户端fd加入到epoll的监听事件中.
+    // 事件函数: readQueryFromClient 
     if ((c = createClient(fd)) == NULL) {
         redisLog(REDIS_WARNING,"Error allocating resources for the client");
         close(fd); /* May be already closed, just ignore errors */
@@ -519,6 +521,7 @@ void acceptTcpHandler(aeEventLoop *el, int fd, void *privdata, int mask) {
     REDIS_NOTUSED(mask);
     REDIS_NOTUSED(privdata);
 
+    // accept 新连上来的客户端. 并获取客户端ip和端口
     cfd = anetTcpAccept(server.neterr, fd, cip, &cport);
     if (cfd == AE_ERR) {
         redisLog(REDIS_WARNING,"Accepting client connection: %s", server.neterr);
