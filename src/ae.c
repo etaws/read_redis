@@ -74,6 +74,7 @@ aeEventLoop *aeCreateEventLoop(int setsize) {
     eventLoop->stop = 0;
     eventLoop->maxfd = -1;
     eventLoop->beforesleep = NULL;
+    // 会设置 eventLoop->apidata
     if (aeApiCreate(eventLoop) == -1) goto err;
     /* Events with mask == AE_NONE are not set. So let's initialize the
      * vector with it. */
@@ -104,6 +105,8 @@ void aeStop(aeEventLoop *eventLoop) {
 int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
         aeFileProc *proc, void *clientData)
 {
+    // 接收到所有的客户端的socket fd的值不会比 eventLoop->setsize 大
+    // adjustOpenFilesLimit (redis.c) 函数里设置的
     if (fd >= eventLoop->setsize) return AE_ERR;
     aeFileEvent *fe = &eventLoop->events[fd];
 
@@ -263,11 +266,14 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
         long now_sec, now_ms;
         long long id;
 
+        // 如果 te->id 大于 maxId, 那么这个te可能是在这个while循环
+        // 过程中被加入到te 列表中的, 可以不处理这个te, 避免死循环
         if (te->id > maxId) {
             te = te->next;
             continue;
         }
         aeGetTime(&now_sec, &now_ms);
+        // 只有当前时间大于时间事件的时刻, 才会处理这个te
         if (now_sec > te->when_sec ||
             (now_sec == te->when_sec && now_ms >= te->when_ms))
         {
@@ -294,6 +300,8 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
             } else {
                 aeDeleteTimeEvent(eventLoop, id);
             }
+            // te 列表可能已经变化了, 不知道下一个要处理的te是哪个,
+            // 只好再从头开始找
             te = eventLoop->timeEventHead;
         } else {
             te = te->next;
@@ -348,6 +356,7 @@ int aeProcessEvents(aeEventLoop *eventLoop, int flags)
             } else {
                 tvp->tv_usec = (shortest->when_ms - now_ms)*1000;
             }
+            // 最近"将"要发生的事情可能已经错过了. 如果错过, 就不等待
             if (tvp->tv_sec < 0) tvp->tv_sec = 0;
             if (tvp->tv_usec < 0) tvp->tv_usec = 0;
         } else {
