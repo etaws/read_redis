@@ -773,11 +773,15 @@ int processInlineBuffer(redisClient *c) {
             addReplyError(c,"Protocol error: too big inline request");
             setProtocolError(c,0);
         }
+        // 如果没有读到命令结尾, 返回 err. 什么都不会做, 继续等待
         return REDIS_ERR;
     }
 
     /* Split the input buffer up to the \r\n */
     querylen = newline-(c->querybuf);
+    // 按空格把消息切开. 返回包含被切开的数组 argv 和 数组大小 argc
+    // 会在切分的时候新分配内存来保存各个分割的部分
+    // 如果内存不足, 会返回 argv=NULL argc=0
     argv = sdssplitlen(c->querybuf,querylen," ",1,&argc);
 
     /* Leave data after the first line of the query in the buffer */
@@ -793,6 +797,7 @@ int processInlineBuffer(redisClient *c) {
             c->argv[c->argc] = createObject(REDIS_STRING,argv[j]);
             c->argc++;
         } else {
+            // 没有创建对象, 就当场释放空间, 否则这块内存转交 c->argv 来管理
             sdsfree(argv[j]);
         }
     }
