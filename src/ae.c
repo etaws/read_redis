@@ -251,6 +251,11 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
      * events to be processed ASAP when this happens: the idea is that
      * processing events earlier is less dangerous than delaying them
      * indefinitely, and practice suggests it is. */
+
+    // 正常的话, now 肯定是大于 lastTime 的.
+    // 但如果系统时间不准 (system clock skew), 会出现 now 小于 lastTime 的情况. 
+    // 现在每次处理事件时间之前先检查now是否正常,
+    // 如果不正常, 就立刻把待处理的时间事件处理掉
     if (now < eventLoop->lastTime) {
         te = eventLoop->timeEventHead;
         while(te) {
