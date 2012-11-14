@@ -963,6 +963,7 @@ void processInputBuffer(redisClient *c) {
 
         /* Determine request type when unknown. */
         if (!c->reqtype) {
+            // 以*开头的必然是 multibulk 格式的命令
             if (c->querybuf[0] == '*') {
                 c->reqtype = REDIS_REQ_MULTIBULK;
             } else {
@@ -970,6 +971,8 @@ void processInputBuffer(redisClient *c) {
             }
         }
 
+        // 从buffer里面解析出命令, 如果失败, 什么都不做
+        // 如果成功, 继续循环, 继续解析下一个命令 (先会做一次resetClient)
         if (c->reqtype == REDIS_REQ_INLINE) {
             if (processInlineBuffer(c) != REDIS_OK) break;
         } else if (c->reqtype == REDIS_REQ_MULTIBULK) {
@@ -984,7 +987,7 @@ void processInputBuffer(redisClient *c) {
         } else {
             /* Only reset the client when the command was executed. */
             if (processCommand(c) == REDIS_OK)
-                resetClient(c);
+                resetClient(c); // 开始下一个命令的解析之前, 先做一次resetClient
         }
     }
 }
@@ -1007,8 +1010,14 @@ void readQueryFromClient(aeEventLoop *el, int fd, void *privdata, int mask) {
     if (c->reqtype == REDIS_REQ_MULTIBULK && c->multibulklen && c->bulklen != -1
         && c->bulklen >= REDIS_MBULK_BIG_ARG)
     {
+        // c->bulklen 中保存了需要读入的bulk的buffer的大小. +2 是加上 \r\n 的长度
+        // remaining 就是还需要读入多少字节, 才能读完当前的bulk
+        // 例子: *3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n
+        // 这个例子中的 $3 就代表 需要读入5个字节才能完成这个bulk (SET\r\n)
         int remaining = (unsigned)(c->bulklen+2)-sdslen(c->querybuf);
 
+        // 如果remaining比1024*16小, 就不需要读1024*16, 读remaining就行了
+        // 这样正好可以读入一个bulk, 可以减少内存copy的次数, 提高效率
         if (remaining < readlen) readlen = remaining;
     }
 
