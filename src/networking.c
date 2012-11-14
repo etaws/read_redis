@@ -859,7 +859,7 @@ int processMultibulkBuffer(redisClient *c) {
         /* Multi bulk length cannot be read without a \r\n */
         newline = strchr(c->querybuf,'\r');
         if (newline == NULL) {
-            if (sdslen(c->querybuf) > REDIS_INLINE_MAX_SIZE) {
+            if (sdslen(c->querybuf) > REDIS_INLINE_MAX_SIZE) { // <= 1024*64
                 addReplyError(c,"Protocol error: too big mbulk count string");
                 setProtocolError(c,0);
             }
@@ -867,6 +867,8 @@ int processMultibulkBuffer(redisClient *c) {
         }
 
         /* Buffer should also contain \n */
+        // 例子: *3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n
+        // newline 指到第一个 \r, 需要先检查其后必然有一个\n存在
         if (newline-(c->querybuf) > ((signed)sdslen(c->querybuf)-2))
             return REDIS_ERR;
 
@@ -880,12 +882,14 @@ int processMultibulkBuffer(redisClient *c) {
             return REDIS_ERR;
         }
 
+        // buffer[pos] 为 $ 的位置 (上传例子中的 $3)
         pos = (newline-c->querybuf)+2;
         if (ll <= 0) {
             c->querybuf = sdsrange(c->querybuf,pos,-1);
             return REDIS_OK;
         }
 
+        // ll 为bulk的个数, 上面的例子是3 (*3\r\n)
         c->multibulklen = ll;
 
         /* Setup argv array on client structure */
@@ -894,9 +898,12 @@ int processMultibulkBuffer(redisClient *c) {
     }
 
     redisAssertWithInfo(c,NULL,c->multibulklen > 0);
+
+    // 循环把每个bulk读进来. 如果读不完, break
     while(c->multibulklen) {
         /* Read bulk length if unknown */
         if (c->bulklen == -1) {
+            // 从 buffer[pos] (指向的是$) 开始找 \r
             newline = strchr(c->querybuf+pos,'\r');
             if (newline == NULL) {
                 if (sdslen(c->querybuf) > REDIS_INLINE_MAX_SIZE) {
@@ -924,19 +931,27 @@ int processMultibulkBuffer(redisClient *c) {
                 setProtocolError(c,pos);
                 return REDIS_ERR;
             }
-
+            // 例子: *3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n
+            // ll为当前bulk的长度 c->bulklen=3 ($3)
+            // buffer[pos] 指向 S (例子中的 SET\r\n)
             pos += newline-(c->querybuf+pos)+2;
             if (ll >= REDIS_MBULK_BIG_ARG) {
                 /* If we are going to read a large object from network
                  * try to make it likely that it will start at c->querybuf
                  * boundary so that we can optimized object creation
                  * avoiding a large copy of data. */
+                // 如果是一个暴大的bulk, 那么把
+                // buffer = "*3\r\n$3\r\nSET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n"
+                // 做成(去掉bulk之前的内容): "SET\r\n$5\r\nmykey\r\n$7\r\nmyvalue\r\n"
                 c->querybuf = sdsrange(c->querybuf,pos,-1);
                 pos = 0;
                 /* Hint the sds library about the amount of bytes this string is
                  * going to contain. */
+                // 然后按照bulk的长度准备好空间, 下次直接把整个暴大的bulk整个
+                // 读进来
                 c->querybuf = sdsMakeRoomFor(c->querybuf,ll+2);
             }
+            // c->bulklen=3 ($3)
             c->bulklen = ll;
         }
 
@@ -952,24 +967,30 @@ int processMultibulkBuffer(redisClient *c) {
                 c->bulklen >= REDIS_MBULK_BIG_ARG &&
                 (signed) sdslen(c->querybuf) == c->bulklen+2)
             {
+                // 如果是暴大的bulk, 一次把整个bulk读进来
                 c->argv[c->argc++] = createObject(REDIS_STRING,c->querybuf);
                 sdsIncrLen(c->querybuf,-2); /* remove CRLF */
                 c->querybuf = sdsempty();
                 /* Assume that if we saw a fat argument we'll see another one
                  * likely... */
+                // heuristic: 已经读入了一个暴大的bulk, 很有可能再读到一个暴大
+                // 的bulk, 先准备好空间
                 c->querybuf = sdsMakeRoomFor(c->querybuf,c->bulklen+2);
                 pos = 0;
             } else {
                 c->argv[c->argc++] =
                     createStringObject(c->querybuf+pos,c->bulklen);
                 pos += c->bulklen+2;
+                // 这个例子里面, buffer[pos] 会指向 $ ($5\r\n)
             }
+            // 当前bulk完成读入工作, bulk reset 为 -1
             c->bulklen = -1;
             c->multibulklen--;
         }
     }
 
     /* Trim to pos */
+    // 从头部去掉已经处理过的内容
     if (pos) c->querybuf = sdsrange(c->querybuf,pos,-1);
 
     /* We're done when c->multibulk == 0 */
