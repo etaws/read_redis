@@ -23,6 +23,22 @@ start_server {tags {"dump"}} {
         set e
     } {*is busy*}
 
+    test {RESTORE can overwrite an existing key with REPLACE} {
+        r set foo bar1
+        set encoded1 [r dump foo]
+        r set foo bar2
+        set encoded2 [r dump foo]
+        r del foo
+        r restore foo 0 $encoded1
+        r restore foo 0 $encoded2 replace
+        r get foo
+    } {bar2}
+
+    test {RESTORE can detect a syntax error for unrecongized options} {
+        catch {r restore foo 0 "..." invalid-option} e
+        set e
+    } {*syntax*}
+
     test {DUMP of non existing key returns nil} {
         r dump nonexisting_key
     } {}
@@ -43,6 +59,47 @@ start_server {tags {"dump"}} {
             assert {[$second exists key] == 1}
             assert {[$second get key] eq {Some Value}}
             assert {[$second ttl key] == -1}
+        }
+    }
+
+    test {MIGRATE is able to copy a key between two instances} {
+        set first [srv 0 client]
+        r del list
+        r lpush list a b c d
+        start_server {tags {"repl"}} {
+            set second [srv 0 client]
+            set second_host [srv 0 host]
+            set second_port [srv 0 port]
+
+            assert {[$first exists list] == 1}
+            assert {[$second exists list] == 0}
+            set ret [r -1 migrate $second_host $second_port list 9 5000 copy]
+            assert {$ret eq {OK}}
+            assert {[$first exists list] == 1}
+            assert {[$second exists list] == 1}
+            assert {[$first lrange list 0 -1] eq [$second lrange list 0 -1]}
+        }
+    }
+
+    test {MIGRATE will not overwrite existing keys, unless REPLACE is used} {
+        set first [srv 0 client]
+        r del list
+        r lpush list a b c d
+        start_server {tags {"repl"}} {
+            set second [srv 0 client]
+            set second_host [srv 0 host]
+            set second_port [srv 0 port]
+
+            assert {[$first exists list] == 1}
+            assert {[$second exists list] == 0}
+            $second set list somevalue
+            catch {r -1 migrate $second_host $second_port list 9 5000 copy} e
+            assert_match {ERR*} $e
+            set res [r -1 migrate $second_host $second_port list 9 5000 copy replace]
+            assert {$ret eq {OK}}
+            assert {[$first exists list] == 1}
+            assert {[$second exists list] == 1}
+            assert {[$first lrange list 0 -1] eq [$second lrange list 0 -1]}
         }
     }
 
