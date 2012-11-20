@@ -707,16 +707,19 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
         if (c->bufpos > 0) {
             if (c->flags & REDIS_MASTER) {
                 /* Don't reply to a master */
+                // 当作发送成功了, 发送的bytes数 (nwritten) 为 buffer 大小减去
+                // 已经发送的bytes数 (c->bufpos - c->sentlen)
                 nwritten = c->bufpos - c->sentlen;
             } else {
                 nwritten = write(fd,c->buf+c->sentlen,c->bufpos-c->sentlen);
                 if (nwritten <= 0) break;
             }
-            c->sentlen += nwritten;
-            totwritten += nwritten;
+            c->sentlen += nwritten; // 更新当前buffer中已经发送的bytes数
+            totwritten += nwritten; // 更新本次循环中, 总发送的bytes数
 
             /* If the buffer was sent, set bufpos to zero to continue with
              * the remainder of the reply. */
+            // 当前buffer中的内容全部发送完毕, reset bufpos 和 sentlen
             if (c->sentlen == c->bufpos) {
                 c->bufpos = 0;
                 c->sentlen = 0;
@@ -735,6 +738,8 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
                 /* Don't reply to a master */
                 nwritten = objlen - c->sentlen;
             } else {
+                // 一个obj可能多次发送才发送完成.
+                // c->sentlen记录了目前发送了多少bytes
                 nwritten = write(fd, ((char*)o->ptr)+c->sentlen,objlen-c->sentlen);
                 if (nwritten <= 0) break;
             }
@@ -770,6 +775,7 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
             return;
         }
     }
+    // 只要这次循环中发送的数据大于0, 就需要更新最后一次交互时间
     if (totwritten > 0) c->lastinteraction = server.unixtime;
     if (c->bufpos == 0 && listLength(c->reply) == 0) {
         c->sentlen = 0;
