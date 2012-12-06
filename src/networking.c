@@ -121,8 +121,18 @@ redisClient *createClient(int fd) {
  * data to the clients output buffers. If the function returns REDIS_ERR no
  * data should be appended to the output buffers. */
 int prepareClientToWrite(redisClient *c) {
+    // 对 lua 客户端, 直接返回 ok
     if (c->flags & REDIS_LUA_CLIENT) return REDIS_OK;
+    // fd <= 0, fake 客户端, 返回 error, 不发送
     if (c->fd <= 0) return REDIS_ERR; /* Fake client */
+
+    // 有以下几种情况:
+    // 1) 客户端的发送buffer中还残留得有未发送的数据, 不设置写回调函数, 直接返回ok
+    // 2) 客户端不是 REDIS_REPL_NONE, REDIS_REPL_ONLINE 这两种状态,
+    //    不设置写回调函数, 直接返回ok; 此时,
+    //    所有需要发送到客户端的数据都会被保留在客户端对象的发送缓冲buffer中
+    // 3) 对其他情况 (发送buffer中没有残留数据, 且客户端在 REDIS_REPL_NONE 或
+    //    REDIS_REPL_ONLINE 状态) 设置写回调函数. 成功返回ok, 失败返回error
     if (c->bufpos == 0 && listLength(c->reply) == 0 &&
         (c->replstate == REDIS_REPL_NONE ||
          c->replstate == REDIS_REPL_ONLINE) &&
@@ -158,9 +168,13 @@ int _addReplyToBuffer(redisClient *c, char *s, size_t len) {
 
     /* If there already are entries in the reply list, we cannot
      * add anything more to the static buffer. */
+    // client 的发送数据buffer由 static buffer 和 reply list组成;
+    // 如果 reply list 内有数据等待发送, 则新的需要发送的数据不能被添加到
+    // static buffer
     if (listLength(c->reply) > 0) return REDIS_ERR;
 
     /* Check that the buffer has enough space available for this string. */
+    // static buffer 中的空间不足了, 新的数据也不能添加到 static buffer
     if (len > available) return REDIS_ERR;
 
     memcpy(c->buf+c->bufpos,s,len);
@@ -185,6 +199,11 @@ void _addReplyObjectToList(redisClient *c, robj *o) {
             sdslen(tail->ptr)+sdslen(o->ptr) <= REDIS_REPLY_CHUNK_BYTES)
         {
             c->reply_bytes -= zmalloc_size_sds(tail->ptr);
+            // 1) 如果 reply list 的最后一个节点被引用数大于1, 新复制出一个新对象
+            //    把这个新的对象作为 reply list 的最后一个对象
+            //    (现在要动这个节点的内容, 需要复制出一个新的对象,
+            //    然后在新的对象上做内容变动, 老的对象内容保持不变)
+            // 2) 然后把要发送的数据添加到 reply list 的最后一个对象中去
             tail = dupLastObjectIfNeeded(c->reply);
             tail->ptr = sdscatlen(tail->ptr,o->ptr,sdslen(o->ptr));
             c->reply_bytes += zmalloc_size_sds(tail->ptr);
@@ -265,7 +284,7 @@ void _addReplyStringToList(redisClient *c, char *s, size_t len) {
  * Higher level functions to queue data on the client output buffer.
  * The following functions are the ones that commands implementations will call.
  * -------------------------------------------------------------------------- */
-
+// 当需要向客户端发送响应消息时, 会调用这个函数
 void addReply(redisClient *c, robj *obj) {
     if (prepareClientToWrite(c) != REDIS_OK) return;
 
@@ -761,6 +780,10 @@ void sendReplyToClient(aeEventLoop *el, int fd, void *privdata, int mask) {
          *
          * However if we are over the maxmemory limit we ignore that and
          * just deliver as much data as it is possible to deliver. */
+        // 可能的话, 不要一次向一个client发送太多的数据.
+        // 要腾出一点时间来处理其他客户端.
+        // 但是, 如果当前使用的总内存数太大的话, 还是应该尽可能的多发出数据,
+        // 这样发送成功以后能够清空出更多的发送buffer的内存, 节约内存占用
         if (totwritten > REDIS_MAX_WRITE_PER_EVENT &&
             (server.maxmemory == 0 ||
              zmalloc_used_memory() < server.maxmemory)) break;
