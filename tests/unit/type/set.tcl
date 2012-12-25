@@ -199,9 +199,10 @@ start_server {
 
         test "SDIFFSTORE with three sets - $type" {
             r sdiffstore setres set1 set4 set5
-            # The type is determined by type of the first key to diff against.
-            # See the implementation for more information.
-            assert_encoding $type setres
+            # When we start with intsets, we should always end with intsets.
+            if {$type eq {intset}} {
+                assert_encoding intset setres
+            }
             assert_equal {1 2 3 4} [lsort [r smembers setres]]
         }
     }
@@ -212,6 +213,32 @@ start_server {
         r sadd set3 a b c d
         r sdiff set1 set2 set3
     } {}
+
+    test "SDIFF fuzzing" {
+        for {set j 0} {$j < 100} {incr j} {
+            unset -nocomplain s
+            array set s {}
+            set args {}
+            set num_sets [expr {[randomInt 10]+1}]
+            for {set i 0} {$i < $num_sets} {incr i} {
+                set num_elements [randomInt 100]
+                r del set_$i
+                lappend args set_$i
+                while {$num_elements} {
+                    set ele [randomValue]
+                    r sadd set_$i $ele
+                    if {$i == 0} {
+                        set s($ele) x
+                    } else {
+                        unset -nocomplain s($ele)
+                    }
+                    incr num_elements -1
+                }
+            }
+            set result [lsort [r sdiff {*}$args]]
+            assert_equal $result [lsort [array names s]]
+        }
+    }
 
     test "SINTER against non-set should throw error" {
         r set key1 x

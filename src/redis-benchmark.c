@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/time.h>
 #include <signal.h>
 #include <assert.h>
@@ -106,7 +107,7 @@ static long long mstime(void) {
     long long mst;
 
     gettimeofday(&tv, NULL);
-    mst = ((long)tv.tv_sec)*1000;
+    mst = ((long long)tv.tv_sec)*1000;
     mst += tv.tv_usec/1000;
     return mst;
 }
@@ -510,6 +511,7 @@ int main(int argc, const char **argv) {
 
     client c;
 
+    srandom(time(NULL));
     signal(SIGHUP, SIG_IGN);
     signal(SIGPIPE, SIG_IGN);
 
