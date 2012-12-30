@@ -313,9 +313,13 @@ static void _dictRehashStep(dict *d) {
 /* Add an element to the target hash table */
 int dictAdd(dict *d, void *key, void *val)
 {
+    // 创建一个 key 对应的 entry, 然后把这个 entry 挂到 dict 中对应的位置
     dictEntry *entry = dictAddRaw(d,key);
 
+    // 如果 entry 为 NULL, 说明这个 key 已经在 dict 中存在了
     if (!entry) return DICT_ERR;
+    // 把 value 也放到 entry 中, 有两种可能: value 复制一份后放到 entry;
+    // 或者 value 不复制, 直接放到 entry
     dictSetVal(d, entry, val);
     return DICT_OK;
 }
@@ -335,6 +339,10 @@ int dictAdd(dict *d, void *key, void *val)
  * If key already exists NULL is returned.
  * If key was added, the hash entry is returned to be manipulated by the caller.
  */
+// 如果 dict 中这个key对应的 entry 已经存在的话什么都不做, 返回 NULL
+// 否则创建一个 entry, 把 key 的值放到 entry 中. 然后把 entry 挂到 dict 上
+// 特别注意: key 的值可能copy出一份新的 放到 entry 中; 也可能不copy, 直接放
+// 另外, 会做一次 rehash
 dictEntry *dictAddRaw(dict *d, void *key)
 {
     int index;
@@ -380,6 +388,7 @@ int dictReplace(dict *d, void *key, void *val)
      * you want to increment (set), and then decrement (free), and not the
      * reverse. */
     auxentry = *entry;
+    // 用新value替换旧value, 可能会改动新旧 value 的引用计数
     dictSetVal(d, entry, val);
     dictFreeVal(d, &auxentry);
     return 0;
@@ -483,17 +492,19 @@ dictEntry *dictFind(dict *d, const void *key)
     unsigned int h, idx, table;
 
     if (d->ht[0].size == 0) return NULL; /* We don't have a table at all */
+    // 在 dict 中做 find 时, 也会做一下 rehash
     if (dictIsRehashing(d)) _dictRehashStep(d);
+    // 获取 key 对应的 hash 值
     h = dictHashKey(d, key);
     for (table = 0; table <= 1; table++) {
-        idx = h & d->ht[table].sizemask;
+        idx = h & d->ht[table].sizemask; // 根据 hash 值获取hash表数组中的位置 (取模)
         he = d->ht[table].table[idx];
         while(he) {
             if (dictCompareKeys(d, key, he->key))
                 return he;
             he = he->next;
         }
-        if (!dictIsRehashing(d)) return NULL;
+        if (!dictIsRehashing(d)) return NULL; // 如果没有正在做 rehash, 只需要在ht[0]中查找
     }
     return NULL;
 }

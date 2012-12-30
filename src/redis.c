@@ -520,6 +520,8 @@ dictType shaScriptObjectDictType = {
 };
 
 /* Db->expires */
+// 不提供释放key/value内存的函数
+// 所以在 db->expires 上调用 dictDelete 不会释放内存
 dictType keyptrDictType = {
     dictSdsHash,               /* hash function */
     NULL,                      /* key dup */
@@ -1037,6 +1039,8 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
     }
 
     /* Write the AOF buffer on disk */
+    // 每次进入一下次事件循环之前会先把aof buffer 中的内容刷到aof文件中
+    // 这样保证在下次循环返回写入操作成功之前成功写入aof日志
     flushAppendOnlyFile(0);
 }
 
@@ -1607,6 +1611,7 @@ int processCommand(redisClient *c) {
 
     /* Now lookup the command and check ASAP about trivial error conditions
      * such as wrong arity, bad command name and so forth. */
+    // 根据命令名字找到对应的命令 (后面的 call 函数中会调用这个命令)
     c->cmd = c->lastcmd = lookupCommand(c->argv[0]->ptr);
     if (!c->cmd) {
         flagTransaction(c);
@@ -1739,6 +1744,7 @@ int processCommand(redisClient *c) {
         queueMultiCommand(c);
         addReply(c,shared.queued);
     } else {
+        // 前面的判断流程都通过以后做真正的操作
         call(c,REDIS_CALL_FULL);
         if (listLength(server.ready_keys))
             handleClientsBlockedOnLists();

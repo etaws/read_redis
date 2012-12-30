@@ -301,6 +301,7 @@ static int processTimeEvents(aeEventLoop *eventLoop) {
              * deletion (putting references to the nodes to delete into
              * another linked list). */
             if (retval != AE_NOMORE) {
+                // 当前时刻加上时间事件的返回值就是下一次事件时间被调用的时刻
                 aeAddMillisecondsToNow(retval,&te->when_sec,&te->when_ms);
             } else {
                 aeDeleteTimeEvent(eventLoop, id);

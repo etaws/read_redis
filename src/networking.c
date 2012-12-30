@@ -68,7 +68,7 @@ redisClient *createClient(int fd) {
         }
     }
 
-    selectDb(c,0);
+    selectDb(c,0); // 新建客户端时使用默认的 0 号 db
     c->fd = fd;
     c->bufpos = 0;
     c->querybuf = sdsempty();

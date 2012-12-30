@@ -208,10 +208,19 @@ int hashTypeSet(robj *o, robj *field, robj *value) {
             hashTypeConvert(o, REDIS_ENCODING_HT);
     } else if (o->encoding == REDIS_ENCODING_HT) {
         if (dictReplace(o->ptr, field, value)) { /* Insert */
+            // 新建了一个 entry 并将其放到 dict 中
+            // 因为把 field 和 value 直接放到了 entry 对象中
+            // 所以 field 和 value 的引用计数需要加一
             incrRefCount(field);
         } else { /* Update */
+            // 在 dict 中已经存在同样的 key 对应的 entry 了
+            // 所以 field 无用了, 其引用计数无需加一
+            // (完成这个command后调用 resetClient 时会把引用计数再减一来释放内存)
+            // 但 value 替换了原来 entry 的value, value 的引用计数需要加一
             update = 1;
         }
+        // REDIS_ENCODING_HT 的 dictReplace, 会释放旧的 value 的引用计数
+        // 但不会改动新的 value 的引用计数, 所以会在这个地方更新其引用计数
         incrRefCount(value);
     } else {
         redisPanic("Unknown hash encoding");
@@ -397,11 +406,15 @@ robj *hashTypeCurrentObject(hashTypeIterator *hi, int what) {
 }
 
 robj *hashTypeLookupWriteOrCreate(redisClient *c, robj *key) {
+    // 现在这个 client 的 db 中找出这个 key 对应的节点 (如果过期则删除)
     robj *o = lookupKeyWrite(c->db,key);
     if (o == NULL) {
+        // 没有就创建新的: 创建一个新的 hash 对象, 然后把 key->o 挂到 client
+        // 的 db 上
         o = createHashObject();
         dbAdd(c->db,key,o);
     } else {
+        // key->o 这里的 o 肯定要是一个 hash 对象
         if (o->type != REDIS_HASH) {
             addReply(c,shared.wrongtypeerr);
             return NULL;
@@ -469,8 +482,12 @@ void hsetCommand(redisClient *c) {
     robj *o;
 
     if ((o = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
+    // 如果第2个参数或第3个参数的长度超过了限度, 
+    // 需要把 hash 表的存储方式从 ziplist 转换成 dict
     hashTypeTryConversion(o,c->argv,2,3);
+    // 如果存储方式时 dict, 可以把第2个参数, 第3个参数转换成整数来存储
     hashTypeTryObjectEncoding(o,&c->argv[2], &c->argv[3]);
+    // 如 key 对应的 entry 已经在 dict 中存在, 更新; 否则新建对应的 entry
     update = hashTypeSet(o,c->argv[2],c->argv[3]);
     addReply(c, update ? shared.czero : shared.cone);
     signalModifiedKey(c->db,c->argv[1]);

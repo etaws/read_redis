@@ -47,6 +47,8 @@ robj *lookupKey(redisDb *db, robj *key) {
         /* Update the access time for the aging algorithm.
          * Don't do it if we have a saving child, as this will trigger
          * a copy on write madness. */
+        // 如果创建了一个子进程做 save 动作的时候, 不要更新 lru 事件
+        // 避免触发 copy on write
         if (server.rdb_child_pid == -1 && server.aof_child_pid == -1)
             val->lru = server.lruclock;
         return val;
@@ -67,6 +69,7 @@ robj *lookupKeyRead(redisDb *db, robj *key) {
     return val;
 }
 
+// 先判断这个 key 是否过期, 如果过期, 先删除. 然后查找返回 hash 表中的节点
 robj *lookupKeyWrite(redisDb *db, robj *key) {
     expireIfNeeded(db,key);
     return lookupKey(db,key);
@@ -159,6 +162,9 @@ robj *dbRandomKey(redisDb *db) {
 int dbDelete(redisDb *db, robj *key) {
     /* Deleting an entry from the expires dict will not free the sds of
      * the key, because it is shared with the main dictionary. */
+    // 调用 dictDelete 来删除这个节点, 并释放这个节点的内存
+    // 注意: 在 db->expires 上做 dictDelete 时不会释放内存; 在 db->dict
+    // 上做的时候才会释放内存
     if (dictSize(db->expires) > 0) dictDelete(db->expires,key->ptr);
     if (dictDelete(db->dict,key->ptr) == DICT_OK) {
         if (server.cluster_enabled) SlotToKeyDel(key);
@@ -473,16 +479,19 @@ void setExpire(redisDb *db, robj *key, long long when) {
 
 /* Return the expire time of the specified key, or -1 if no expire
  * is associated with this key (i.e. the key is non volatile) */
+// 检查一个key是否过期 (key的值保存在key对象的指针中)
 long long getExpire(redisDb *db, robj *key) {
     dictEntry *de;
 
     /* No expire? return ASAP */
+    // 在过期 dict 中查找这个 key 是否存在
     if (dictSize(db->expires) == 0 ||
        (de = dictFind(db->expires,key->ptr)) == NULL) return -1;
 
     /* The entry was found in the expire dict, this means it should also
      * be present in the main dict (safety check). */
     redisAssertWithInfo(NULL,key,dictFind(db->dict,key->ptr) != NULL);
+    // 过期 dict 中存放的值肯定是一个有符号的整数
     return dictGetSignedIntegerVal(de);
 }
 
@@ -514,6 +523,7 @@ void propagateExpire(redisDb *db, robj *key) {
 int expireIfNeeded(redisDb *db, robj *key) {
     long long when = getExpire(db,key);
 
+    // when == -1 的话, 这个key没有过期时间. 否则 when 就是过期时间
     if (when < 0) return 0; /* No expire for this key */
 
     /* Don't expire anything while loading. It will be done later. */
@@ -526,6 +536,8 @@ int expireIfNeeded(redisDb *db, robj *key) {
      * Still we try to return the right information to the caller, 
      * that is, 0 if we think the key should be still valid, 1 if
      * we think the key is expired at this time. */
+    // 如果当前的 redis 时一个 slave. 不做删除动作, 立马返回. 但
+    // 返回值为1时表示这个 key 确实过期了, 返回 0 代表还没过期
     if (server.masterhost != NULL) {
         return mstime() > when;
     }
