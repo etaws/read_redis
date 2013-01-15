@@ -538,7 +538,9 @@ static void acceptCommonHandler(int fd, int flags) {
     // 给新的客户端新建对应的 redisClient 对象, 并把客户端fd加入到epoll的监听事件中.
     // 事件函数: readQueryFromClient 
     if ((c = createClient(fd)) == NULL) {
-        redisLog(REDIS_WARNING,"Error allocating resources for the client");
+        redisLog(REDIS_WARNING,
+            "Error registering fd event for the new client: %s (fd=%d)",
+            strerror(errno),fd);
         close(fd); /* May be already closed, just ignore errors */
         return;
     }

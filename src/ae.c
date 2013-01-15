@@ -38,6 +38,7 @@
 #include <poll.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #include "ae.h"
 #include "zmalloc.h"
@@ -107,7 +108,10 @@ int aeCreateFileEvent(aeEventLoop *eventLoop, int fd, int mask,
 {
     // 接收到所有的客户端的socket fd的值不会比 eventLoop->setsize 大
     // adjustOpenFilesLimit (redis.c) 函数里设置的
-    if (fd >= eventLoop->setsize) return AE_ERR;
+    if (fd >= eventLoop->setsize) {
+        errno = ERANGE;
+        return AE_ERR;
+    }
     aeFileEvent *fe = &eventLoop->events[fd];
 
     if (aeApiAddEvent(eventLoop, fd, mask) == -1)
