@@ -541,7 +541,7 @@ dictType commandTableDictType = {
     NULL                       /* val destructor */
 };
 
-/* Hash type hash table (note that small hashes are represented with zipmaps) */
+/* Hash type hash table (note that small hashes are represented with ziplists) */
 dictType hashDictType = {
     dictEncObjHash,             /* hash function */
     NULL,                       /* key dup */
@@ -691,6 +691,8 @@ void activeExpireCycle(void) {
 
                     propagateExpire(db,keyobj);
                     dbDelete(db,keyobj);
+                    notifyKeyspaceEvent(REDIS_NOTIFY_EXPIRED,
+                        "expired",keyobj,db->id);
                     decrRefCount(keyobj);
                     expired++;
                     server.stat_expiredkeys++;
@@ -1162,6 +1164,7 @@ void initServerConfig() {
     server.rdb_compression = 1;
     server.rdb_checksum = 1;
     server.activerehashing = 1;
+    server.notify_keyspace_events = 0;
     server.maxclients = REDIS_MAX_CLIENTS;
     server.bpop_blocked_clients = 0;
     server.maxmemory = 0;
@@ -2441,6 +2444,8 @@ int freeMemoryIfNeeded(void) {
                 delta -= (long long) zmalloc_used_memory();
                 mem_freed += delta;
                 server.stat_evictedkeys++;
+                notifyKeyspaceEvent(REDIS_NOTIFY_EVICTED, "evicted",
+                    keyobj, db->id);
                 decrRefCount(keyobj);
                 keys_freed++;
 

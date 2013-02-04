@@ -391,6 +391,14 @@ void loadServerConfigFromString(char *config) {
             }
         } else if (!strcasecmp(argv[0],"slave-priority") && argc == 2) {
             server.slave_priority = atoi(argv[1]);
+        } else if (!strcasecmp(argv[0],"notify-keyspace-events") && argc == 2) {
+            int flags = keyspaceEventsStringToFlags(argv[1]);
+
+            if (flags == -1) {
+                err = "Invalid event class character. Use 'g$lshzxeA'.";
+                goto loaderr;
+            }
+            server.notify_keyspace_events = flags;
         } else if (!strcasecmp(argv[0],"sentinel")) {
             /* argc == 1 is handled by main() as we need to enter the sentinel
              * mode ASAP. */
@@ -709,11 +717,11 @@ void configSetCommand(redisClient *c) {
 
         if (yn == -1) goto badfmt;
         server.rdb_compression = yn;
-    } else if (!strcasecmp(c->argv[2]->ptr,"rdbchecksum")) {
-        int yn = yesnotoi(o->ptr);
+    } else if (!strcasecmp(c->argv[2]->ptr,"notify-keyspace-events")) {
+        int flags = keyspaceEventsStringToFlags(o->ptr);
 
-        if (yn == -1) goto badfmt;
-        server.rdb_checksum = yn;
+        if (flags == -1) goto badfmt;
+        server.notify_keyspace_events = flags;
     } else if (!strcasecmp(c->argv[2]->ptr,"slave-priority")) {
         if (getLongLongFromObject(o,&ll) == REDIS_ERR ||
             ll <= 0) goto badfmt;
@@ -935,6 +943,15 @@ void configGetCommand(redisClient *c) {
         else
             buf[0] = '\0';
         addReplyBulkCString(c,buf);
+        matches++;
+    }
+    if (stringmatch(pattern,"notify-keyspace-events",0)) {
+        robj *flagsobj = createObject(REDIS_STRING,
+            keyspaceEventsFlagsToString(server.notify_keyspace_events));
+
+        addReplyBulkCString(c,"notify-keyspace-events");
+        addReplyBulk(c,flagsobj);
+        decrRefCount(flagsobj);
         matches++;
     }
     setDeferredMultiBulkLength(c,replylen,matches*2);
