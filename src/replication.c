@@ -764,6 +764,9 @@ void replicationCron(void) {
          server.repl_state == REDIS_REPL_RECEIVE_PONG) &&
         (time(NULL)-server.repl_transfer_lastio) > server.repl_timeout)
     {
+        // 如果是在 REDIS_REPL_CONNECTING 状态, 就已经建立了一个从 slave 到
+        // master 的非阻塞连接. 但是需要检查是否超时, 如果超时, 要重新创建这
+        // 个连接
         redisLog(REDIS_WARNING,"Timeout connecting to the MASTER...");
         undoConnectWithMaster();
     }
@@ -772,6 +775,9 @@ void replicationCron(void) {
     if (server.masterhost && server.repl_state == REDIS_REPL_TRANSFER &&
         (time(NULL)-server.repl_transfer_lastio) > server.repl_timeout)
     {
+        // 如果是在 REDIS_REPL_TRANSFER 状态, 就已经在接收 rdb 文件了,
+        // 但是需要检查是否超时, 如果超时, 要重置 slave 的状态到
+        // REDIS_REPL_CONNECTING
         redisLog(REDIS_WARNING,"Timeout receiving bulk data from MASTER... If the problem persists try to set the 'repl-timeout' parameter in redis.conf to a larger value.");
         replicationAbortSyncTransfer();
     }
@@ -780,11 +786,18 @@ void replicationCron(void) {
     if (server.masterhost && server.repl_state == REDIS_REPL_CONNECTED &&
         (time(NULL)-server.master->lastinteraction) > server.repl_timeout)
     {
+        // 如果是在 REDIS_REPL_CONNECTED 状态, 就已经在作为 slave 正常工作了.
+        // 但是需要检查是否超时, 如果超时, 清理掉 (freeClient 中会重置 slave 状态), 
+        // 下一步会重新开始同步过程
         redisLog(REDIS_WARNING,"MASTER time out: no data nor PING received...");
         freeClient(server.master);
     }
 
     /* Check if we should connect to a MASTER */
+    // 1. 创建一个新的非阻塞连接到 master
+    // 2. 然后把这个 fd 的读写事件注册上 (回调函数是: syncWithMaster)
+    // 3. slave 的状态切换到 REDIS_REPL_CONNECTING
+    // 具体过程看 connectWithMaster 函数
     if (server.repl_state == REDIS_REPL_CONNECT) {
         redisLog(REDIS_NOTICE,"Connecting to MASTER...");
         if (connectWithMaster() == REDIS_OK) {
@@ -806,11 +819,15 @@ void replicationCron(void) {
 
             /* Don't ping slaves that are in the middle of a bulk transfer
              * with the master for first synchronization. */
+            // 在 REDIS_REPL_SEND_BULK 状态不发送 PING
             if (slave->replstate == REDIS_REPL_SEND_BULK) continue;
+
+            // REDIS_REPL_ONLINE 状态发送 PING
             if (slave->replstate == REDIS_REPL_ONLINE) {
                 /* If the slave is online send a normal ping */
                 addReplySds(slave,sdsnew("*1\r\n$4\r\nPING\r\n"));
             } else {
+                // 正在做同步的时候, 发一个 "\n", 避免 slave timeout
                 /* Otherwise we are in the pre-synchronization stage.
                  * Just a newline will do the work of refreshing the
                  * connection last interaction time, and at the same time
