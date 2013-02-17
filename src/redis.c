@@ -214,12 +214,13 @@ struct redisCommand redisCommandTable[] = {
     {"bgsave",bgsaveCommand,1,"ar",0,NULL,0,0,0,0,0},
     {"bgrewriteaof",bgrewriteaofCommand,1,"ar",0,NULL,0,0,0,0,0},
     {"shutdown",shutdownCommand,-1,"ar",0,NULL,0,0,0,0,0},
-    {"lastsave",lastsaveCommand,1,"r",0,NULL,0,0,0,0,0},
+    {"lastsave",lastsaveCommand,1,"rR",0,NULL,0,0,0,0,0},
     {"type",typeCommand,2,"r",0,NULL,1,1,1,0,0},
     {"multi",multiCommand,1,"rs",0,NULL,0,0,0,0,0},
     {"exec",execCommand,1,"sM",0,NULL,0,0,0,0,0},
     {"discard",discardCommand,1,"rs",0,NULL,0,0,0,0,0},
     {"sync",syncCommand,1,"ars",0,NULL,0,0,0,0,0},
+    {"psync",syncCommand,3,"ars",0,NULL,0,0,0,0,0},
     {"replconf",replconfCommand,-1,"ars",0,NULL,0,0,0,0,0},
     {"flushdb",flushdbCommand,1,"w",0,NULL,0,0,0,0,0},
     {"flushall",flushallCommand,1,"w",0,NULL,0,0,0,0,0},
@@ -1086,6 +1087,8 @@ void createSharedObjects(void) {
         "-MISCONF Redis is configured to save RDB snapshots, but is currently not able to persist on disk. Commands that may modify the data set are disabled. Please check Redis logs for details about the error.\r\n"));
     shared.roslaveerr = createObject(REDIS_STRING,sdsnew(
         "-READONLY You can't write against a read only slave.\r\n"));
+    shared.noautherr = createObject(REDIS_STRING,sdsnew(
+        "-NOAUTH Authentication required.\r\n"));
     shared.oomerr = createObject(REDIS_STRING,sdsnew(
         "-OOM command not allowed when used memory > 'maxmemory'.\r\n"));
     shared.execaborterr = createObject(REDIS_STRING,sdsnew(
@@ -1095,8 +1098,14 @@ void createSharedObjects(void) {
     shared.plus = createObject(REDIS_STRING,sdsnew("+"));
 
     for (j = 0; j < REDIS_SHARED_SELECT_CMDS; j++) {
+        char dictid_str[64];
+        int dictid_len;
+
+        dictid_len = ll2string(dictid_str,sizeof(dictid_str),j);
         shared.select[j] = createObject(REDIS_STRING,
-            sdscatprintf(sdsempty(),"select %d\r\n", j));
+            sdscatprintf(sdsempty(),
+                "*2\r\n$6\r\nSELECT\r\n$%d\r\n%s\r\n",
+                dictid_len, dictid_str));
     }
     shared.messagebulk = createStringObject("$7\r\nmessage\r\n",13);
     shared.pmessagebulk = createStringObject("$8\r\npmessage\r\n",14);
@@ -1134,6 +1143,7 @@ void initServerConfig() {
     server.dbnum = REDIS_DEFAULT_DBNUM;
     server.verbosity = REDIS_NOTICE;
     server.maxidletime = REDIS_MAXIDLETIME;
+    server.tcpkeepalive = 0;
     server.client_max_querybuf_len = REDIS_MAX_QUERYBUF_LEN;
     server.saveparams = NULL;
     server.loading = 0;
@@ -1181,7 +1191,7 @@ void initServerConfig() {
     server.repl_ping_slave_period = REDIS_REPL_PING_SLAVE_PERIOD;
     server.repl_timeout = REDIS_REPL_TIMEOUT;
     server.cluster_enabled = 0;
-    server.cluster.configfile = zstrdup("nodes.conf");
+    server.cluster_configfile = zstrdup("nodes.conf");
     server.lua_caller = NULL;
     server.lua_time_limit = REDIS_LUA_TIME_LIMIT;
     server.lua_client = NULL;
@@ -1199,12 +1209,25 @@ void initServerConfig() {
     server.masterhost = NULL;
     server.masterport = 6379;
     server.master = NULL;
+    server.cached_master = NULL;
+    server.repl_master_initial_offset = -1;
     server.repl_state = REDIS_REPL_NONE;
     server.repl_syncio_timeout = REDIS_REPL_SYNCIO_TIMEOUT;
     server.repl_serve_stale_data = 1;
     server.repl_slave_ro = 1;
     server.repl_down_since = time(NULL);
+    server.repl_disable_tcp_nodelay = 0;
     server.slave_priority = REDIS_DEFAULT_SLAVE_PRIORITY;
+    server.master_repl_offset = 0;
+
+    /* Replication partial resync backlog */
+    server.repl_backlog = NULL;
+    server.repl_backlog_size = REDIS_DEFAULT_REPL_BACKLOG_SIZE;
+    server.repl_backlog_histlen = 0;
+    server.repl_backlog_idx = 0;
+    server.repl_backlog_off = 0;
+    server.repl_backlog_time_limit = REDIS_DEFAULT_REPL_BACKLOG_TIME_LIMIT;
+    server.repl_no_slaves_since = time(NULL);
 
     /* Client output buffer limits */
     server.client_obuf_limits[REDIS_CLIENT_LIMIT_CLASS_NORMAL].hard_limit_bytes = 0;
@@ -1307,6 +1330,7 @@ void initServer() {
     server.clients_to_close = listCreate();
     server.slaves = listCreate();
     server.monitors = listCreate();
+    server.slaveseldb = -1; /* Force to emit the first SELECT command. */
     server.unblocked_clients = listCreate();
     server.ready_keys = listCreate();
 
@@ -1369,6 +1393,9 @@ void initServer() {
     server.stat_peak_memory = 0;
     server.stat_fork_time = 0;
     server.stat_rejected_conn = 0;
+    server.stat_sync_full = 0;
+    server.stat_sync_partial_ok = 0;
+    server.stat_sync_partial_err = 0;
     memset(server.ops_sec_samples,0,sizeof(server.ops_sec_samples));
     server.ops_sec_idx = 0;
     server.ops_sec_last_sample_time = mstime();
@@ -1522,7 +1549,7 @@ void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc,
 {
     if (server.aof_state != REDIS_AOF_OFF && flags & REDIS_PROPAGATE_AOF)
         feedAppendOnlyFile(cmd,dbid,argv,argc);
-    if (flags & REDIS_PROPAGATE_REPL && listLength(server.slaves))
+    if (flags & REDIS_PROPAGATE_REPL)
         replicationFeedSlaves(server.slaves,dbid,argv,argc);
 }
 
@@ -1635,7 +1662,7 @@ int processCommand(redisClient *c) {
     if (server.requirepass && !c->authenticated && c->cmd->proc != authCommand)
     {
         flagTransaction(c);
-        addReplyError(c,"operation not permitted");
+        addReply(c,shared.noautherr);
         return REDIS_OK;
     }
 
@@ -1644,8 +1671,8 @@ int processCommand(redisClient *c) {
                 !(c->cmd->getkeys_proc == NULL && c->cmd->firstkey == 0)) {
         int hashslot;
 
-        if (server.cluster.state != REDIS_CLUSTER_OK) {
-            addReplyError(c,"The cluster is down. Check with CLUSTER INFO for more information");
+        if (server.cluster->state != REDIS_CLUSTER_OK) {
+            addReplySds(c,sdsnew("-CLUSTERDOWN The cluster is down. Use CLUSTER INFO for more information\r\n"));
             return REDIS_OK;
         } else {
             int ask;
@@ -1653,7 +1680,7 @@ int processCommand(redisClient *c) {
             if (n == NULL) {
                 addReplyError(c,"Multi keys request invalid in cluster");
                 return REDIS_OK;
-            } else if (n != server.cluster.myself) {
+            } else if (n != server.cluster->myself) {
                 addReplySds(c,sdscatprintf(sdsempty(),
                     "-%s %d %s:%d\r\n", ask ? "ASK" : "MOVED",
                     hashslot,n->ip,n->port));
@@ -2117,6 +2144,9 @@ sds genRedisInfoString(char *section) {
             "total_commands_processed:%lld\r\n"
             "instantaneous_ops_per_sec:%lld\r\n"
             "rejected_connections:%lld\r\n"
+            "sync_full:%lld\r\n"
+            "sync_partial_ok:%lld\r\n"
+            "sync_partial_err:%lld\r\n"
             "expired_keys:%lld\r\n"
             "evicted_keys:%lld\r\n"
             "keyspace_hits:%lld\r\n"
@@ -2129,6 +2159,9 @@ sds genRedisInfoString(char *section) {
             server.stat_numcommands,
             getOperationsPerSecond(),
             server.stat_rejected_conn,
+            server.stat_sync_full,
+            server.stat_sync_partial_ok,
+            server.stat_sync_partial_err,
             server.stat_expiredkeys,
             server.stat_evictedkeys,
             server.stat_keyspace_hits,
@@ -2153,13 +2186,15 @@ sds genRedisInfoString(char *section) {
                 "master_link_status:%s\r\n"
                 "master_last_io_seconds_ago:%d\r\n"
                 "master_sync_in_progress:%d\r\n"
+                "slave_repl_offset:%lld\r\n"
                 ,server.masterhost,
                 server.masterport,
                 (server.repl_state == REDIS_REPL_CONNECTED) ?
                     "up" : "down",
                 server.master ?
                 ((int)(server.unixtime-server.master->lastinteraction)) : -1,
-                server.repl_state == REDIS_REPL_TRANSFER
+                server.repl_state == REDIS_REPL_TRANSFER,
+                server.master ? server.master->reploff : -1
             );
 
             if (server.repl_state == REDIS_REPL_TRANSFER) {
@@ -2217,6 +2252,17 @@ sds genRedisInfoString(char *section) {
                 slaveid++;
             }
         }
+        info = sdscatprintf(info,
+            "master_repl_offset:%lld\r\n"
+            "repl_backlog_active:%d\r\n"
+            "repl_backlog_size:%lld\r\n"
+            "repl_backlog_first_byte_offset:%lld\r\n"
+            "repl_backlog_histlen:%lld\r\n",
+            server.master_repl_offset,
+            server.repl_backlog != NULL,
+            server.repl_backlog_size,
+            server.repl_backlog_off,
+            server.repl_backlog_histlen);
     }
 
     /* CPU */
@@ -2296,7 +2342,6 @@ void monitorCommand(redisClient *c) {
     if (c->flags & REDIS_SLAVE) return;
 
     c->flags |= (REDIS_SLAVE|REDIS_MONITOR);
-    c->slaveseldb = 0;
     listAddNodeTail(server.monitors,c);
     addReply(c,shared.ok);
 }
