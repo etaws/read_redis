@@ -76,6 +76,7 @@
 #define REDIS_CONFIGLINE_MAX    1024
 #define REDIS_EXPIRELOOKUPS_PER_CRON    10 /* lookup 10 expires per loop */
 #define REDIS_EXPIRELOOKUPS_TIME_PERC   25 /* CPU max % for keys collection */
+#define REDIS_DBCRON_DBS_PER_CALL 16
 #define REDIS_MAX_WRITE_PER_EVENT (1024*64)
 #define REDIS_SHARED_SELECT_CMDS 10
 #define REDIS_SHARED_INTEGERS 10000
@@ -122,6 +123,7 @@
 #define REDIS_CMD_LOADING 512               /* "l" flag */
 #define REDIS_CMD_STALE 1024                /* "t" flag */
 #define REDIS_CMD_SKIP_MONITOR 2048         /* "M" flag */
+#define REDIS_CMD_ASKING 4096               /* "k" flag */
 
 /* Object types */
 #define REDIS_STRING 0
@@ -517,7 +519,6 @@ typedef struct redisOpArray {
 #define REDIS_CLUSTER_SLOTS 16384
 #define REDIS_CLUSTER_OK 0          /* Everything looks ok */
 #define REDIS_CLUSTER_FAIL 1        /* The cluster can't work */
-#define REDIS_CLUSTER_NEEDHELP 2    /* The cluster works, but needs some help */
 #define REDIS_CLUSTER_NAMELEN 40    /* sha1 hex length */
 #define REDIS_CLUSTER_PORT_INCR 10000 /* Cluster port = baseport + PORT_INCR */
 
@@ -542,32 +543,44 @@ typedef struct clusterLink {
 #define REDIS_NODE_MEET 128     /* Send a MEET message to this node */
 #define REDIS_NODE_NULL_NAME "\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"
 
+/* This structure represent elements of node->fail_reports. */
+struct clusterNodeFailReport {
+    struct clusterNode *node;  /* Node reporting the failure condition. */
+    time_t time;               /* Time of the last report from this node. */
+} typedef clusterNodeFailReport;
+
 struct clusterNode {
     char name[REDIS_CLUSTER_NAMELEN]; /* Node name, hex string, sha1-size */
     int flags;      /* REDIS_NODE_... */
     unsigned char slots[REDIS_CLUSTER_SLOTS/8]; /* slots handled by this node */
+    int numslots;   /* Number of slots handled by this node */
     int numslaves;  /* Number of slave nodes, if this is a master */
     struct clusterNode **slaves; /* pointers to slave nodes */
     struct clusterNode *slaveof; /* pointer to the master node */
     time_t ping_sent;       /* Unix time we sent latest ping */
     time_t pong_received;   /* Unix time we received the pong */
+    time_t fail_time;       /* Unix time when FAIL flag was set */
     char *configdigest;         /* Configuration digest of this node */
     time_t configdigest_ts;     /* Configuration digest timestamp */
     char ip[16];                /* Latest known IP address of this node */
     int port;                   /* Latest known port of this node */
     clusterLink *link;          /* TCP/IP link with this node */
+    list *fail_reports;         /* List of nodes signaling this as failing */
 };
 typedef struct clusterNode clusterNode;
 
 typedef struct {
     clusterNode *myself;  /* This node */
     int state;            /* REDIS_CLUSTER_OK, REDIS_CLUSTER_FAIL, ... */
+    int size;             /* Num of master nodes with at least one slot */
     int node_timeout;
     dict *nodes;          /* Hash table of name -> clusterNode structures */
     clusterNode *migrating_slots_to[REDIS_CLUSTER_SLOTS];
     clusterNode *importing_slots_from[REDIS_CLUSTER_SLOTS];
     clusterNode *slots[REDIS_CLUSTER_SLOTS];
     zskiplist *slots_to_keys;
+    int failover_auth_time;     /* Time at which we sent the AUTH request. */
+    int failover_auth_count;    /* Number of authorizations received. */
 } clusterState;
 
 /* Redis cluster messages header */
@@ -581,6 +594,8 @@ typedef struct {
 #define CLUSTERMSG_TYPE_MEET 2          /* Meet "let's join" message */
 #define CLUSTERMSG_TYPE_FAIL 3          /* Mark node xxx as failing */
 #define CLUSTERMSG_TYPE_PUBLISH 4       /* Pub/Sub Publish propagation */
+#define CLUSTERMSG_TYPE_FAILOVER_AUTH_REQUEST 5 /* May I failover? */
+#define CLUSTERMSG_TYPE_FAILOVER_AUTH_ACK 6     /* Yes, you can failover. */
 
 /* Initially we don't know our "name", but we'll find it once we connect
  * to the first node, using the getsockname() function. Then we'll use this
@@ -647,7 +662,8 @@ struct redisServer {
     /* General */
     int hz;                     /* serverCron() calls frequency in hertz */
     redisDb *db;
-    dict *commands;             /* Command table hash table */
+    dict *commands;             /* Command table */
+    dict *orig_commands;        /* Command table before command renaming. */
     aeEventLoop *el;
     unsigned lruclock:22;       /* Clock incrementing every minute, for LRU */
     unsigned lruclock_padding:10;
@@ -952,6 +968,8 @@ long long mstime(void);
 void getRandomHexChars(char *p, unsigned int len);
 uint64_t crc64(uint64_t crc, const unsigned char *s, uint64_t l);
 void exitFromChild(int retcode);
+long popcount(void *s, long count);
+void redisSetProcTitle(char *title);
 
 /* networking.c -- Networking and Client related operations */
 redisClient *createClient(int fd);
@@ -1084,6 +1102,8 @@ void replicationCron(void);
 void replicationHandleMasterDisconnection(void);
 void replicationCacheMaster(redisClient *c);
 void resizeReplicationBacklog(long long newsize);
+void replicationSetMaster(char *ip, int port);
+void replicationUnsetMaster(void);
 
 /* Generic persistence functions */
 void startLoading(FILE *fp);
@@ -1119,11 +1139,13 @@ zskiplistNode *zslInsert(zskiplist *zsl, double score, robj *obj);
 unsigned char *zzlInsert(unsigned char *zl, robj *ele, double score);
 int zslDelete(zskiplist *zsl, double score, robj *obj);
 zskiplistNode *zslFirstInRange(zskiplist *zsl, zrangespec range);
+zskiplistNode *zslLastInRange(zskiplist *zsl, zrangespec range);
 double zzlGetScore(unsigned char *sptr);
 void zzlNext(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
 void zzlPrev(unsigned char *zl, unsigned char **eptr, unsigned char **sptr);
 unsigned int zsetLength(robj *zobj);
 void zsetConvert(robj *zobj, int encoding);
+unsigned long zslGetRank(zskiplist *zsl, double score, robj *o);
 
 /* Core functions */
 int freeMemoryIfNeeded(void);
@@ -1131,11 +1153,17 @@ int processCommand(redisClient *c);
 void setupSignalHandlers(void);
 struct redisCommand *lookupCommand(sds name);
 struct redisCommand *lookupCommandByCString(char *s);
+struct redisCommand *lookupCommandOrOriginal(sds name);
 void call(redisClient *c, int flags);
 void propagate(struct redisCommand *cmd, int dbid, robj **argv, int argc, int flags);
 void alsoPropagate(struct redisCommand *cmd, int dbid, robj **argv, int argc, int target);
 int prepareForShutdown();
+#ifdef __GNUC__
+void redisLog(int level, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+#else
 void redisLog(int level, const char *fmt, ...);
+#endif
 void redisLogRaw(int level, const char *msg);
 void redisLogFromHandler(int level, const char *msg);
 void usage();
@@ -1216,7 +1244,9 @@ long long emptyDb();
 int selectDb(redisClient *c, int id);
 void signalModifiedKey(redisDb *db, robj *key);
 void signalFlushedDb(int dbid);
-unsigned int GetKeysInSlot(unsigned int hashslot, robj **keys, unsigned int count);
+unsigned int getKeysInSlot(unsigned int hashslot, robj **keys, unsigned int count);
+unsigned int countKeysInSlot(unsigned int hashslot);
+int verifyClusterConfigWithData(void);
 
 /* API to get key arguments from commands */
 #define REDIS_GETKEYS_ALL 0

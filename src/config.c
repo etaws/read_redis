@@ -68,11 +68,21 @@ void loadServerConfigFromString(char *config) {
         linenum = i+1;
         lines[i] = sdstrim(lines[i]," \t\r\n");
 
-        /* Skip comments and blank lines*/
+        /* Skip comments and blank lines */
         if (lines[i][0] == '#' || lines[i][0] == '\0') continue;
 
         /* Split into arguments */
         argv = sdssplitargs(lines[i],&argc);
+        if (argv == NULL) {
+            err = "Unbalanced quotes in configuration line";
+            goto loaderr;
+        }
+
+        /* Skip this line if the resulting command vector is empty. */
+        if (argc == 0) {
+            sdsfreesplitres(argv,argc);
+            return;
+        }
         sdstolower(argv[0]);
 
         /* Execute config directives */
@@ -240,7 +250,7 @@ void loadServerConfigFromString(char *config) {
                 err = "argument must be 'yes' or 'no'"; goto loaderr;
             }
         } else if (!strcasecmp(argv[0],"repl-backlog-size") && argc == 2) {
-            long long size = strtoll(argv[0],NULL,10);
+            long long size = strtoll(argv[1],NULL,10);
             if (size <= 0) {
                 err = "repl-backlog-size must be 1 or greater.";
                 goto loaderr;
@@ -438,6 +448,12 @@ void loadServerConfigFromString(char *config) {
         sdsfreesplitres(argv,argc);
     }
     sdsfreesplitres(lines,totlines);
+
+    /* Sanity checks. */
+    if (server.cluster_enabled && server.masterhost) {
+        err = "slaveof directive not allowed in cluster mode";
+        goto loaderr;
+    }
     return;
 
 loaderr:
